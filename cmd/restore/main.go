@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 )
 
-func ptr[T any](v T) *T { return &v }
-
 func main() {
 	if len(os.Args) < 4 {
 		fmt.Fprintf(os.Stderr, "usage: restore <targetDir> <full.bak.gz> <incr1.bak.gz> [incr2.bak.gz ...]\n")
@@ -69,8 +67,8 @@ func main() {
 		ZSTDCompressionLevel: 3, // Баланс CPU/диск: заметно экономит место/IO без большого CPU-оверхеда.
 
 		// --- Транзакции/конкурентность/шифрование ---
-		DetectConflicts: ptr(true), // Оптимистичный контроль конфликтов (MVCC). Твой TM ретраит ErrConflict.
-		EncryptionKey:   key,       // Шифрование на диске (AES-256). Держи ключ вне репозитория; длина ровно 32 байта.
+		DetectConflicts: true, // Оптимистичный контроль конфликтов (MVCC). Твой TM ретраит ErrConflict.
+		EncryptionKey:   key,  // Шифрование на диске (AES-256). Держи ключ вне репозитория; длина ровно 32 байта.
 	}
 	store, err := sdk.Open(opts)
 	if err != nil {

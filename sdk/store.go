@@ -2,6 +2,7 @@ package sdk
 
 import (
 	"context"
+	"log"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
@@ -26,10 +27,11 @@ const (
 )
 
 type Options struct {
-	Dir      string
-	ValueDir string
-	InMemory bool
-	ReadOnly bool
+	Dir         string
+	ValueDir    string
+	InMemory    bool
+	ReadOnly    bool
+	WithMetrics bool
 
 	GCInterval    time.Duration
 	SyncWrites    bool
@@ -49,8 +51,45 @@ type Options struct {
 	NumCompactors    int
 
 	ZSTDCompressionLevel int
-	DetectConflicts      *bool
+	DetectConflicts      bool
 	EncryptionKey        []byte
+}
+
+func (s *Store) StartBadgerMemStats() {
+	bc := s.db.BlockCacheMetrics()
+	ic := s.db.IndexCacheMetrics()
+
+	// текущая загрузка (не уходим в минус)
+	blockUsed := int64(0)
+	if a, e := int64(bc.CostAdded()), int64(bc.CostEvicted()); a > e {
+		blockUsed = a - e
+	}
+	indexUsed := int64(0)
+	if a, e := int64(ic.CostAdded()), int64(ic.CostEvicted()); a > e {
+		indexUsed = a - e
+	}
+
+	blockCap := s.db.Opts().BlockCacheSize
+	indexCap := s.db.Opts().IndexCacheSize
+	lsmSize, vlogSize := s.db.Size() // байты
+
+	pct := func(used, cap int64) int {
+		if cap <= 0 {
+			return 0
+		}
+		return int((float64(used) / float64(cap)) * 100.0)
+	}
+	mib := func(b int64) int64 { return b >> 20 }
+
+	log.Printf(
+		"[Badger]\n"+
+			"  BlockCache: used=%d MiB / %d MiB (%d%%), hits=%d, misses=%d\n"+
+			"  IndexCache: used=%d MiB / %d MiB (%d%%), hits=%d, misses=%d\n"+
+			"  OnDisk:     LSM=%d MiB, VLog=%d MiB",
+		mib(blockUsed), mib(blockCap), pct(blockUsed, blockCap), bc.Hits(), bc.Misses(),
+		mib(indexUsed), mib(indexCap), pct(indexUsed, indexCap), ic.Hits(), ic.Misses(),
+		mib(lsmSize), mib(vlogSize),
+	)
 }
 
 func Open(opts Options) (*Store, error) {
@@ -66,6 +105,10 @@ func Open(opts Options) (*Store, error) {
 		bo = bo.WithLoggingLevel(badger.WARNING)
 	default:
 		bo = bo.WithLoggingLevel(badger.ERROR)
+	}
+
+	if opts.WithMetrics {
+		bo.WithMetricsEnabled(true)
 	}
 
 	if opts.InMemory {
@@ -92,7 +135,6 @@ func Open(opts Options) (*Store, error) {
 		bo = bo.WithIndexCacheSize(opts.IndexCacheSize)
 	}
 
-	// Порог и размеры (v4)
 	if opts.ValueThreshold > 0 {
 		bo = bo.WithValueThreshold(opts.ValueThreshold)
 	}
@@ -100,7 +142,7 @@ func Open(opts Options) (*Store, error) {
 		bo = bo.WithValueLogFileSize(opts.ValueLogFileSize)
 	}
 	if opts.BaseTableSize > 0 {
-		bo = bo.WithBaseTableSize(opts.BaseTableSize) // ← исправление
+		bo = bo.WithBaseTableSize(opts.BaseTableSize)
 	}
 	if opts.MemTableSize > 0 {
 		bo = bo.WithMemTableSize(opts.MemTableSize)
@@ -115,8 +157,8 @@ func Open(opts Options) (*Store, error) {
 	if opts.ZSTDCompressionLevel != 0 {
 		bo = bo.WithZSTDCompressionLevel(opts.ZSTDCompressionLevel)
 	}
-	if opts.DetectConflicts != nil {
-		bo = bo.WithDetectConflicts(*opts.DetectConflicts)
+	if opts.DetectConflicts {
+		bo = bo.WithDetectConflicts(opts.DetectConflicts)
 	}
 	if len(opts.EncryptionKey) > 0 {
 		bo = bo.WithEncryptionKey(opts.EncryptionKey)
