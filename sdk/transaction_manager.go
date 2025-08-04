@@ -14,8 +14,6 @@ type RWTx func(ctx context.Context, tx *badger.Txn) error
 type RTx func(ctx context.Context, tx *badger.Txn) error
 
 type TransactionManager interface {
-	ExecuteReadOnly(fn RTx) error
-	ExecuteReadWrite(fn RWTx) error
 	ExecuteReadOnlyWithContext(ctx context.Context, fn RTx) error
 	ExecuteReadWriteWithContext(ctx context.Context, fn RWTx) error
 }
@@ -56,24 +54,6 @@ func NewTransactionManager(store *Store, opts ...TxManagerOptions) *Manager {
 		baseBackoff: o.BaseBackoff,
 		maxBackoff:  o.MaxBackoff,
 	}
-}
-
-// Удобные обёртки без контекста (для совместимости)
-func (m *Manager) ExecuteReadOnly(fn RTx) error {
-	return m.store.db.View(func(tx *badger.Txn) error {
-		return fn(context.Background(), tx)
-	})
-}
-
-func (m *Manager) ExecuteReadWrite(fn RWTx) error {
-	// Один проход без ретраев/контекстов
-	tx := m.store.db.NewTransaction(true)
-	defer tx.Discard()
-
-	if err := fn(context.Background(), tx); err != nil {
-		return err
-	}
-	return tx.Commit()
 }
 
 func (m *Manager) ExecuteReadOnlyWithContext(ctx context.Context, action RTx) error {

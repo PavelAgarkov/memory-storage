@@ -12,6 +12,10 @@ type Store struct {
 	stopGC chan struct{}
 }
 
+func (s *Store) DB() *badger.DB {
+	return s.db
+}
+
 type LogLevel string
 
 const (
@@ -25,6 +29,7 @@ type Options struct {
 	Dir      string
 	ValueDir string
 	InMemory bool
+	ReadOnly bool
 
 	GCInterval    time.Duration
 	SyncWrites    bool
@@ -65,6 +70,9 @@ func Open(opts Options) (*Store, error) {
 
 	if opts.InMemory {
 		bo = bo.WithInMemory(true)
+	}
+	if opts.ReadOnly {
+		bo = bo.WithReadOnly(true)
 	}
 	if opts.ValueDir != "" {
 		bo = bo.WithValueDir(opts.ValueDir)

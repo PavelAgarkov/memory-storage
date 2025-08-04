@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	user "github.com/PavelAgarkov/memory-storage/protobuf/core"
+	model "github.com/PavelAgarkov/memory-storage/protobuf/core"
 	"github.com/PavelAgarkov/memory-storage/sdk"
 	"github.com/dgraph-io/badger/v4"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -12,6 +12,8 @@ import (
 	"os"
 	"time"
 )
+
+const CurrentUserSchemeVersion = "v3"
 
 func ptr[T any](v T) *T { return &v }
 
@@ -29,11 +31,16 @@ func main() {
 	// Пример: ключ шифрования должен быть ровно 32 байта (AES-256).
 	// Прочитай его из секрета/ENV/файла; здесь просто заглушка.
 	// var key []byte = mustLoad32ByteKey()
+	//version := "v3"
+	//dir := filepath.Join(".", "data", version) // ./data/v1
+	//valueDir := filepath.Join(dir, "vlog")
 	store, err := sdk.Open(
 		sdk.Options{
-			Dir:      "./data",      // Каталог для LSM-дерева (SST, MANIFEST). Данные/индексы на диске.
-			ValueDir: "./data/vlog", // Каталог для value-log (крупные значения). Разделяем с LSM для более предсказуемого I/O.
-			InMemory: false,         // Хранить на диске (прод-режим). true делай только для тестов — файлов не будет.
+			//Dir:      dir,      // Каталог для LSM-дерева (SST, MANIFEST). Данные/индексы на диске.
+			//ValueDir: valueDir, // Каталог для value-log (крупные значения). Разделяем с LSM для более предсказуемого I/O.
+			//InMemory: false,    // Хранить на диске (прод-режим). true делай только для тестов — файлов не будет.
+			InMemory: true,
+			ReadOnly: false,
 
 			// --- Обслуживание и надежность ---
 			GCInterval:    10 * time.Minute, // Периодический GC value-log (освобождение места). Реже → меньше фонового I/O.
@@ -44,7 +51,7 @@ func main() {
 			LoggingLevel: sdk.LogError, // Пишем только ошибки Badger; для диагностики можно поднять до LogInfo.
 
 			// --- Кеши в RAM (критично для p95/p99 чтений) ---
-			BlockCacheSize: 256 << 20, // 256 MiB кеш блоков данных SST: меньше рандомных дисковых чтений при Get/сканах.
+			BlockCacheSize: 256 << 20, // 256 MiB кеш-блоков данных SST: меньше рандомных дисковых чтений при Get/сканах.
 			IndexCacheSize: 128 << 20, // 128 MiB кеш индексов/Bloom: быстрее поиск ключей, особенно важно при шифровании.
 
 			// --- Порог/размеры (формируют поведение LSM и vlog) ---
@@ -63,25 +70,11 @@ func main() {
 			EncryptionKey:   key,       // Шифрование на диске (AES-256). Держи ключ вне репозитория; длина ровно 32 байта.
 		})
 
-	defer store.Close()
-
-	userKey := []byte("user:v1:123")
-
-	_ = store.Set(context.Background(), userKey, []byte(`{"id":123}`), 24*time.Hour)
-
-	store.Delete(context.Background(), userKey)
-
-	val, err := store.Get(context.Background(), userKey) // []byte(JSON)
-	if errors.Is(err, sdk.ErrNotFound) {
-		fmt.Println("not found")
+	if err != nil {
+		fmt.Println("Failed to open Badger store:", err)
+		return
 	}
-	fmt.Println(string(val))
-
-	prefix := []byte("user:v1:")
-	_ = store.ScanPrefix(prefix, 1000, func(kv sdk.KV) error {
-		fmt.Println(string(kv.Value))
-		return nil
-	})
+	defer store.Close()
 
 	txOpt := sdk.TxManagerOptions{
 		MaxRetries:  3,
@@ -92,10 +85,10 @@ func main() {
 	err = transactionManager.ExecuteReadWriteWithContext(
 		context.Background(),
 		func(ctx context.Context, tx *badger.Txn) error {
-			userKey := []byte("user:v1:123")
+			userKey := []byte("user:" + CurrentUserSchemeVersion + ":123")
 
 			// читаем текущее значение (если есть)
-			var u user.User
+			var u model.User
 			item, err := tx.Get(userKey)
 			if err != nil {
 				if !errors.Is(err, badger.ErrKeyNotFound) {
@@ -130,9 +123,9 @@ func main() {
 		fmt.Println(err)
 	}
 
-	prefix = []byte("user:v1:")
-	_ = store.ScanPrefix([]byte("user:v1:"), 1000, func(kv sdk.KV) error {
-		var u user.User
+	prefix := []byte("user:" + CurrentUserSchemeVersion + ":")
+	_ = store.ScanPrefix(prefix, 1000, func(kv sdk.KV) error {
+		var u model.User
 		if err := proto.Unmarshal(kv.Value, &u); err != nil {
 			return fmt.Errorf("unmarshal protobuf: %w", err)
 		}

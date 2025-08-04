@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.6
 // 	protoc        v6.31.1
-// source: core/user.proto
+// source: core/model.proto
 
 package mock
 
@@ -32,7 +32,7 @@ type User struct {
 
 func (x *User) Reset() {
 	*x = User{}
-	mi := &file_core_user_proto_msgTypes[0]
+	mi := &file_core_model_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -44,7 +44,7 @@ func (x *User) String() string {
 func (*User) ProtoMessage() {}
 
 func (x *User) ProtoReflect() protoreflect.Message {
-	mi := &file_core_user_proto_msgTypes[0]
+	mi := &file_core_model_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -57,7 +57,7 @@ func (x *User) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use User.ProtoReflect.Descriptor instead.
 func (*User) Descriptor() ([]byte, []int) {
-	return file_core_user_proto_rawDescGZIP(), []int{0}
+	return file_core_model_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *User) GetId() int64 {
@@ -74,32 +74,32 @@ func (x *User) GetName() string {
 	return ""
 }
 
-var File_core_user_proto protoreflect.FileDescriptor
+var File_core_model_proto protoreflect.FileDescriptor
 
-const file_core_user_proto_rawDesc = "" +
+const file_core_model_proto_rawDesc = "" +
 	"\n" +
-	"\x0fcore/user.proto\x12\auser.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"*\n" +
+	"\x10core/model.proto\x12\auser.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"*\n" +
 	"\x04User\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04nameB\x18Z\x16memory-storage/v1;mockb\x06proto3"
 
 var (
-	file_core_user_proto_rawDescOnce sync.Once
-	file_core_user_proto_rawDescData []byte
+	file_core_model_proto_rawDescOnce sync.Once
+	file_core_model_proto_rawDescData []byte
 )
 
-func file_core_user_proto_rawDescGZIP() []byte {
-	file_core_user_proto_rawDescOnce.Do(func() {
-		file_core_user_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_core_user_proto_rawDesc), len(file_core_user_proto_rawDesc)))
+func file_core_model_proto_rawDescGZIP() []byte {
+	file_core_model_proto_rawDescOnce.Do(func() {
+		file_core_model_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_core_model_proto_rawDesc), len(file_core_model_proto_rawDesc)))
 	})
-	return file_core_user_proto_rawDescData
+	return file_core_model_proto_rawDescData
 }
 
-var file_core_user_proto_msgTypes = make([]protoimpl.MessageInfo, 1)
-var file_core_user_proto_goTypes = []any{
+var file_core_model_proto_msgTypes = make([]protoimpl.MessageInfo, 1)
+var file_core_model_proto_goTypes = []any{
 	(*User)(nil), // 0: user.v1.User
 }
-var file_core_user_proto_depIdxs = []int32{
+var file_core_model_proto_depIdxs = []int32{
 	0, // [0:0] is the sub-list for method output_type
 	0, // [0:0] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
@@ -107,26 +107,26 @@ var file_core_user_proto_depIdxs = []int32{
 	0, // [0:0] is the sub-list for field type_name
 }
 
-func init() { file_core_user_proto_init() }
-func file_core_user_proto_init() {
-	if File_core_user_proto != nil {
+func init() { file_core_model_proto_init() }
+func file_core_model_proto_init() {
+	if File_core_model_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_core_user_proto_rawDesc), len(file_core_user_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_core_model_proto_rawDesc), len(file_core_model_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   1,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
-		GoTypes:           file_core_user_proto_goTypes,
-		DependencyIndexes: file_core_user_proto_depIdxs,
-		MessageInfos:      file_core_user_proto_msgTypes,
+		GoTypes:           file_core_model_proto_goTypes,
+		DependencyIndexes: file_core_model_proto_depIdxs,
+		MessageInfos:      file_core_model_proto_msgTypes,
 	}.Build()
-	File_core_user_proto = out.File
-	file_core_user_proto_goTypes = nil
-	file_core_user_proto_depIdxs = nil
+	File_core_model_proto = out.File
+	file_core_model_proto_goTypes = nil
+	file_core_model_proto_depIdxs = nil
 }
