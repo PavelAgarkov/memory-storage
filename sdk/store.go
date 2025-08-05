@@ -2,6 +2,7 @@ package sdk
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
@@ -174,4 +175,23 @@ func (s *Store) Delete(key []byte) error {
 	return s.db.Update(func(txn *badger.Txn) error {
 		return txn.Delete(key)
 	})
+}
+
+func (s *Store) SetObject(key []byte, v any, ttl time.Duration) error {
+	data, err := s.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("codec.Marshal: %w", err)
+	}
+	return s.Set(key, data, ttl)
+}
+
+func (s *Store) GetObject(key []byte, v any) error {
+	data, err := s.Get(key)
+	if err != nil {
+		return err
+	}
+	if err := s.Unmarshal(data, v); err != nil {
+		return fmt.Errorf("codec.Unmarshal: %w", err)
+	}
+	return nil
 }

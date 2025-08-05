@@ -89,9 +89,10 @@ func main() {
 					return fmt.Errorf("get user: %w", err)
 				}
 			} else {
-				if err := item.Value(func(val []byte) error {
-					return proto.Unmarshal(val, &u)
-				}); err != nil {
+				unmarshalFunc := func(val []byte) error {
+					return store.Unmarshal(val, &u)
+				}
+				if err := item.Value(unmarshalFunc); err != nil {
 					return fmt.Errorf("unmarshal user: %w", err)
 				}
 				fmt.Printf("Current user data: id=%d name=%q\n", u.GetId(), u.GetName())
@@ -101,7 +102,6 @@ func main() {
 			u.Id = 123
 			u.Name = "Updated User"
 
-			store
 			b, err := proto.MarshalOptions{Deterministic: true}.Marshal(&u)
 			if err != nil {
 				return fmt.Errorf("marshal user: %w", err)

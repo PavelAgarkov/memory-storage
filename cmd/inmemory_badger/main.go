@@ -7,24 +7,13 @@ import (
 	model "github.com/PavelAgarkov/memory-storage/protobuf/core"
 	"github.com/PavelAgarkov/memory-storage/sdk"
 	"github.com/dgraph-io/badger/v4"
-	"os"
 	"time"
 )
 
 const CurrentUserSchemeVersion = "v3"
 
 func main() {
-	key, err := os.ReadFile("badger.key")
-	if err != nil {
-		fmt.Println("Failed to read Badger encryption key:", err)
-		return
-	}
-	if len(key) != 32 {
-		fmt.Println("Badger encryption key must be 32 bytes")
-		return
-	}
-
-	memLimits := sdk.ComputeMemoryLimit(16 * sdk.GiB)
+	memLimits := sdk.ComputeMemoryLimit(2 * sdk.GiB)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -54,6 +43,14 @@ func main() {
 	}
 	defer store.Close()
 
+	userKey := []byte("user:" + CurrentUserSchemeVersion + ":123")
+	user1 := &model.User{
+		Id:   22,
+		Name: "Updated User 2",
+	}
+	bytes, _ := store.Marshal(user1)
+	_ = store.Set(userKey, bytes, 0)
+
 	txOpt := sdk.TxManagerOptions{
 		MaxRetries:  3,
 		BaseBackoff: 50 * time.Millisecond,
@@ -63,9 +60,6 @@ func main() {
 	err = transactionManager.ExecuteReadWriteWithContext(
 		context.Background(),
 		func(ctx context.Context, tx *badger.Txn) error {
-			userKey := []byte("user:" + CurrentUserSchemeVersion + ":123")
-
-			// читаем текущее значение (если есть)
 			var u model.User
 			item, err := tx.Get(userKey)
 			if err != nil {
@@ -99,6 +93,8 @@ func main() {
 		},
 	)
 
+	_ = store.Delete(userKey)
+
 	if err != nil {
 		fmt.Println(err)
 	}
@@ -108,12 +104,14 @@ func main() {
 		Id:   22,
 		Name: "Updated User 2",
 	}
-	bytes, _ := store.Marshal(user2)
-	_ = store.Set(userKey2, bytes, 0)
+	//bytes, _ = store.Marshal(user2)
+	//_ = store.Set(userKey2, bytes, 0)
+	_ = store.SetObject(userKey2, user2, 0)
 
 	var user3 model.User
-	getUser2Bytes, _ := store.Get(userKey2)
-	_ = store.Unmarshal(getUser2Bytes, &user3)
+	//getUser2Bytes, _ := store.Get(userKey2)
+	//_ = store.Unmarshal(getUser2Bytes, &user3)
+	_ = store.GetObject(userKey2, &user3)
 	out, _ := sdk.ProtoJsonToOutput(&user3)
 	fmt.Println(string(out) + "check")
 
