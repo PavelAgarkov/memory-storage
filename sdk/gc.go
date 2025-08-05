@@ -1,6 +1,9 @@
 package sdk
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 func (s *Store) runGC(interval time.Duration) {
 	t := time.NewTicker(interval)
@@ -8,6 +11,7 @@ func (s *Store) runGC(interval time.Duration) {
 	for {
 		select {
 		case <-s.stopGC:
+			fmt.Println("Stopping Badger GC")
 			return
 		case <-t.C:
 			// Badger рекомендует несколькими попытками вызывать GC пока возвращает nil.

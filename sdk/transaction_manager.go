@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
@@ -14,7 +13,6 @@ type RWTx func(ctx context.Context, tx *badger.Txn) error
 type RTx func(ctx context.Context, tx *badger.Txn) error
 
 type TransactionManager interface {
-	ExecuteReadOnlyWithContext(ctx context.Context, fn RTx) error
 	ExecuteReadWriteWithContext(ctx context.Context, fn RWTx) error
 }
 
@@ -54,15 +52,6 @@ func NewTransactionManager(store *Store, opts ...TxManagerOptions) *Manager {
 		baseBackoff: o.BaseBackoff,
 		maxBackoff:  o.MaxBackoff,
 	}
-}
-
-func (m *Manager) ExecuteReadOnlyWithContext(ctx context.Context, action RTx) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return m.store.db.View(func(tx *badger.Txn) error {
-		return action(ctx, tx)
-	})
 }
 
 func (m *Manager) ExecuteReadWriteWithContext(ctx context.Context, action RWTx) error {
@@ -108,24 +97,34 @@ func (m *Manager) ExecuteReadWriteWithContext(ctx context.Context, action RWTx) 
 	}
 }
 
+func (s *Store) TxSetObject(tx *badger.Txn, key []byte, v any) error {
+	data, err := s.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return tx.Set(key, data)
+}
+
+func (s *Store) TxGetObject(tx *badger.Txn, key []byte, v any) error {
+	item, err := tx.Get(key)
+	if err != nil {
+		return err
+	}
+	return item.Value(func(val []byte) error {
+		return s.Unmarshal(val, v)
+	})
+}
+
 func sleepWithJitter(ctx context.Context, base, max time.Duration, attempt int) error {
 	if attempt < 1 {
 		attempt = 1
 	}
 
-	// экспоненциальный рост: base * 2^(attempt-1), с ограничением max
-	backoff := base * time.Duration(1<<uint(attempt-1))
-	if backoff > max {
+	backoff := base * time.Duration(attempt)
+	if max > 0 && backoff > max {
 		backoff = max
 	}
-	if backoff < 0 {
-		backoff = 0
-	}
-
-	// полнодевятный джиттер: [0, backoff)
-	j := backoff
-	if j <= 0 {
-		// сразу проверим контекст и выходим без сна
+	if backoff <= 0 {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -134,9 +133,7 @@ func sleepWithJitter(ctx context.Context, base, max time.Duration, attempt int) 
 		}
 	}
 
-	d := time.Duration(rand.Int63n(int64(j)))
-
-	t := time.NewTimer(d)
+	t := time.NewTimer(backoff)
 	defer t.Stop()
 	select {
 	case <-ctx.Done():

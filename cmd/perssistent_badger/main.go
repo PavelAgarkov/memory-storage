@@ -10,6 +10,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -26,18 +27,18 @@ func main() {
 		return
 	}
 
-	// Пример: ключ шифрования должен быть ровно 32 байта (AES-256).
-	// Прочитай его из секрета/ENV/файла; здесь просто заглушка.
-	// var key []byte = mustLoad32ByteKey()
-	//version := "v3"
-	//dir := filepath.Join(".", "data", version) // ./data/v1
-	//valueDir := filepath.Join(dir, "vlog")
+	memLimits := sdk.ComputeMemoryLimit(16 * sdk.GiB)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	version := "v3"
+	dir := filepath.Join(".", "data", version) // ./data/v1
+	valueDir := filepath.Join(dir, "vlog")
 	store, err := sdk.Open(
+		ctx,
 		sdk.Options{
-			//Dir:      dir,      // Каталог для LSM-дерева (SST, MANIFEST). Данные/индексы на диске.
-			//ValueDir: valueDir, // Каталог для value-log (крупные значения). Разделяем с LSM для более предсказуемого I/O.
-			//InMemory: false,    // Хранить на диске (прод-режим). true делай только для тестов — файлов не будет.
-			InMemory: true,
+			Dir:      dir,      // Каталог для LSM-дерева (SST, MANIFEST). Данные/индексы на диске.
+			ValueDir: valueDir, // Каталог для value-log (крупные значения). Разделяем с LSM для более предсказуемого I/O.
+			InMemory: false,    // Хранить на диске (прод-режим). true делай только для тестов — файлов не будет.
 			ReadOnly: false,
 
 			// --- Обслуживание и надежность ---
@@ -47,32 +48,6 @@ func main() {
 
 			// --- Логирование ---
 			LoggingLevel: sdk.LogError, // Пишем только ошибки Badger; для диагностики можно поднять до LogInfo.
-
-			// --- Кеши в RAM (критично для p95/p99 чтений) ---
-			// --- RAM-кеши SST-таблиц (чтение) ---
-			BlockCacheSize: 8 << 30, // 8 GiB
-			//    LRU-кеш для «страниц» (blocks) SST-файлов.
-			//    До 8 GiB наиболее часто читаемых блоков держится в памяти.
-			//    При переполнении Badger удаляет самые старые блоки,
-			//     чтобы не превышать лимит и избежать OOM.
-			//
-			IndexCacheSize: 4 << 30, // 4 GiB
-			//    LRU-кеш для Bloom-фильтров и индексов SST.
-			//    Ускоряет проверку «есть ли ключ в файле» без чтения с диска.
-			//    Хранится до 4 GiB; при переполнении самые старые записи сбрасываются.
-
-			// --- Память для записей перед флашем в SST ---
-			MemTableSize: 2 << 30, // 2 GiB
-			//    Размер одного memtable (активного буфера записи) в памяти.
-			//    Когда буфер достигает 2 GiB, Badger замораживает его
-			//     и начинает асинхронно сбрасывать в новую SST-таблицу.
-			//
-			NumMemtables: 2, // максимум 2 memtables одновременно
-			//    Общее число memtable-структур (1 активная + до 1 immutable).
-			//    При достижении 2 GiB в активной и 1 immutable memtable:
-			//       – Новые операции записи будут блокироваться (backpressure)
-			//         до завершения флаша immutable-memtable.
-			//    Это ограничивает пиковое потребление памяти под буферы до 2 × 2 GiB = 4 GiB
 
 			// --- Порог/размеры (формируют поведение LSM и vlog) ---
 			ValueThreshold:   1024,     // ≤1 KiB значение хранится в LSM: Get читает всё из SST без прыжка в vlog (быстрее чтения).
@@ -86,7 +61,8 @@ func main() {
 			// --- Транзакции/конкурентность/шифрование ---
 			DetectConflicts: true, // Оптимистичный контроль конфликтов (MVCC). Твой TM ретраит ErrConflict.
 			EncryptionKey:   key,  // Шифрование на диске (AES-256). Держи ключ вне репозитория; длина ровно 32 байта.
-		})
+			Codec:           &sdk.ProtoCodec{},
+		}, memLimits)
 
 	if err != nil {
 		fmt.Println("Failed to open Badger store:", err)
@@ -125,6 +101,7 @@ func main() {
 			u.Id = 123
 			u.Name = "Updated User"
 
+			store
 			b, err := proto.MarshalOptions{Deterministic: true}.Marshal(&u)
 			if err != nil {
 				return fmt.Errorf("marshal user: %w", err)
@@ -152,5 +129,5 @@ func main() {
 		return nil
 	})
 
-	store.StartBadgerMemStats()
+	//store.StartBadgerMemStats()
 }

@@ -2,14 +2,16 @@ package sdk
 
 import (
 	"context"
-	"log"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
 )
 
+var ErrNotFound = badger.ErrKeyNotFound
+
 type Store struct {
-	db     *badger.DB
+	db *badger.DB
+	Codec
 	stopGC chan struct{}
 }
 
@@ -17,82 +19,7 @@ func (s *Store) DB() *badger.DB {
 	return s.db
 }
 
-type LogLevel string
-
-const (
-	LogDebug   LogLevel = "DEBUG"
-	LogInfo    LogLevel = "INFO"
-	LogWarning LogLevel = "WARNING"
-	LogError   LogLevel = "ERROR"
-)
-
-type Options struct {
-	Dir         string
-	ValueDir    string
-	InMemory    bool
-	ReadOnly    bool
-	WithMetrics bool
-
-	GCInterval    time.Duration
-	SyncWrites    bool
-	NumGoroutines int
-	LoggingLevel  LogLevel
-
-	// Кеши/размеры и прочее (v4)
-	BlockCacheSize int64
-	IndexCacheSize int64
-
-	// Порог/размеры (все int64 в v4)
-	ValueThreshold   int64
-	ValueLogFileSize int64
-	BaseTableSize    int64 // ← вместо MaxTableSize
-	MemTableSize     int64
-	NumMemtables     int
-	NumCompactors    int
-
-	ZSTDCompressionLevel int
-	DetectConflicts      bool
-	EncryptionKey        []byte
-}
-
-func (s *Store) StartBadgerMemStats() {
-	bc := s.db.BlockCacheMetrics()
-	ic := s.db.IndexCacheMetrics()
-
-	// текущая загрузка (не уходим в минус)
-	blockUsed := int64(0)
-	if a, e := int64(bc.CostAdded()), int64(bc.CostEvicted()); a > e {
-		blockUsed = a - e
-	}
-	indexUsed := int64(0)
-	if a, e := int64(ic.CostAdded()), int64(ic.CostEvicted()); a > e {
-		indexUsed = a - e
-	}
-
-	blockCap := s.db.Opts().BlockCacheSize
-	indexCap := s.db.Opts().IndexCacheSize
-	lsmSize, vlogSize := s.db.Size() // байты
-
-	pct := func(used, cap int64) int {
-		if cap <= 0 {
-			return 0
-		}
-		return int((float64(used) / float64(cap)) * 100.0)
-	}
-	mib := func(b int64) int64 { return b >> 20 }
-
-	log.Printf(
-		"[Badger]\n"+
-			"  BlockCache: used=%d MiB / %d MiB (%d%%), hits=%d, misses=%d\n"+
-			"  IndexCache: used=%d MiB / %d MiB (%d%%), hits=%d, misses=%d\n"+
-			"  OnDisk:     LSM=%d MiB, VLog=%d MiB",
-		mib(blockUsed), mib(blockCap), pct(blockUsed, blockCap), bc.Hits(), bc.Misses(),
-		mib(indexUsed), mib(indexCap), pct(indexUsed, indexCap), ic.Hits(), ic.Misses(),
-		mib(lsmSize), mib(vlogSize),
-	)
-}
-
-func Open(opts Options) (*Store, error) {
+func Open(ctx context.Context, opts Options, limit *MemoryLimit) (*Store, error) {
 	bo := badger.DefaultOptions(opts.Dir)
 
 	// Уровень логов
@@ -128,11 +55,36 @@ func Open(opts Options) (*Store, error) {
 	}
 
 	// Кеши
-	if opts.BlockCacheSize > 0 {
-		bo = bo.WithBlockCacheSize(opts.BlockCacheSize)
+	if limit != nil && limit.BlockCacheSize > 0 {
+		bo = bo.WithBlockCacheSize(limit.BlockCacheSize)
+	} else {
+		if opts.BlockCacheSize > 0 {
+			bo = bo.WithBlockCacheSize(opts.BlockCacheSize)
+		}
 	}
-	if opts.IndexCacheSize > 0 {
-		bo = bo.WithIndexCacheSize(opts.IndexCacheSize)
+
+	if limit != nil && limit.IndexCacheSize > 0 {
+		bo = bo.WithIndexCacheSize(limit.IndexCacheSize)
+	} else {
+		if opts.IndexCacheSize > 0 {
+			bo = bo.WithIndexCacheSize(opts.IndexCacheSize)
+		}
+	}
+
+	if limit != nil && limit.MemTableSize > 0 {
+		bo = bo.WithMemTableSize(limit.MemTableSize)
+	} else {
+		if opts.MemTableSize > 0 {
+			bo = bo.WithMemTableSize(opts.MemTableSize)
+		}
+	}
+
+	if limit != nil && limit.NumMemtables > 0 {
+		bo = bo.WithNumMemtables(limit.NumMemtables)
+	} else {
+		if opts.NumMemtables > 0 {
+			bo = bo.WithNumMemtables(opts.NumMemtables)
+		}
 	}
 
 	if opts.ValueThreshold > 0 {
@@ -144,12 +96,7 @@ func Open(opts Options) (*Store, error) {
 	if opts.BaseTableSize > 0 {
 		bo = bo.WithBaseTableSize(opts.BaseTableSize)
 	}
-	if opts.MemTableSize > 0 {
-		bo = bo.WithMemTableSize(opts.MemTableSize)
-	}
-	if opts.NumMemtables > 0 {
-		bo = bo.WithNumMemtables(opts.NumMemtables)
-	}
+
 	if opts.NumCompactors > 0 {
 		bo = bo.WithNumCompactors(opts.NumCompactors)
 	}
@@ -168,10 +115,28 @@ func Open(opts Options) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{db: db, stopGC: make(chan struct{})}
-	if opts.GCInterval > 0 {
-		go s.runGC(opts.GCInterval)
+
+	codec := opts.Codec
+	if codec == nil {
+		codec = JSONCodec{}
 	}
+
+	s := &Store{
+		db:     db,
+		Codec:  codec,
+		stopGC: make(chan struct{}),
+	}
+
+	if opts.GCInterval > 0 && !opts.InMemory && !opts.ReadOnly {
+		go func() {
+			s.runGC(opts.GCInterval)
+		}()
+	}
+
+	go func() {
+		s.runMonitoring(ctx)
+	}()
+
 	return s, nil
 }
 
@@ -180,20 +145,17 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// Базовые операции
-func (s *Store) Set(ctx context.Context, key, value []byte, ttl time.Duration) error {
+func (s *Store) Set(key, value []byte, ttl time.Duration) error {
 	return s.db.Update(func(txn *badger.Txn) error {
 		e := badger.NewEntry(key, value)
 		if ttl > 0 {
-			e = e.WithTTL(ttl) // TTL поддерживается на уровне Entry
+			e = e.WithTTL(ttl)
 		}
 		return txn.SetEntry(e)
 	})
 }
 
-var ErrNotFound = badger.ErrKeyNotFound
-
-func (s *Store) Get(ctx context.Context, key []byte) ([]byte, error) {
+func (s *Store) Get(key []byte) ([]byte, error) {
 	var out []byte
 	err := s.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(key)
@@ -208,7 +170,7 @@ func (s *Store) Get(ctx context.Context, key []byte) ([]byte, error) {
 	return out, err
 }
 
-func (s *Store) Delete(ctx context.Context, key []byte) error {
+func (s *Store) Delete(key []byte) error {
 	return s.db.Update(func(txn *badger.Txn) error {
 		return txn.Delete(key)
 	})
