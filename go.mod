@@ -7,6 +7,7 @@ toolchain go1.23.9
 require (
 	github.com/RoaringBitmap/roaring v1.9.4
 	github.com/go-redis/redis/v8 v8.11.5
+	github.com/google/btree v1.1.3
 )
 
 require (
