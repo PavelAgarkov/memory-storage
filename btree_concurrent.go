@@ -263,7 +263,7 @@ func (b *ByteKeyBTree) ListExpiredAt(now time.Time, ttl time.Duration, maxCount 
 	if ttl <= 0 {
 		return nil
 	}
-	cutoff := now.Add(-ttl).Unix()
+	cutoff := now.Unix()
 
 	var out [][]byte
 	limit := maxCount > 0
@@ -271,6 +271,7 @@ func (b *ByteKeyBTree) ListExpiredAt(now time.Time, ttl time.Duration, maxCount 
 	b.mu.RLock()
 	b.tree.Ascend(func(x btree.Item) bool {
 		it := x.(nodeItem)
+		//log.Printf("Checking difference it.timestampUnixSeconds-cutoff=%d", it.timestampUnixSeconds-cutoff)
 		if it.timestampUnixSeconds <= cutoff {
 			k := cloneBytes(it.keyBytes)
 			out = append(out, k)
