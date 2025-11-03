@@ -9,19 +9,33 @@ import (
 	"github.com/google/btree"
 )
 
-type TtlBTree interface {
-	UpsertAt(key []byte, ts time.Time) bool
-	UpsertManyAt(keys [][]byte, at time.Time) int
-	Delete(key []byte) bool
-	DeleteMany(keys [][]byte) int
-	Has(key []byte) bool
-	GetLastWriteUnix(key []byte) (int64, bool)
-	ForEach(callback func(key []byte, timestampUnixSeconds int64) bool) error
-	Size() int
-	Reset()
-	PurgeExpiredAt(now time.Time, ttl time.Duration, maxToDelete int) int
-	ListExpiredAt(now time.Time, ttl time.Duration, maxCount int) [][]byte
-}
+type (
+	TtlBTree interface {
+		UpsertAt(item Item, ts time.Time) bool
+		UpsertManyAt(items []Item, at time.Time) int
+		Delete(item Item) bool
+		DeleteMany(items []Item) int
+		Has(item Item) bool
+		GetNodeItem(item Item) (Item, bool)
+		GetLastWriteUnix(item Item) (int64, bool)
+		ForEach(callback func(key []byte, timestampUnixSeconds int64) bool) error
+		Size() int
+		Reset()
+		PurgeExpiredAt(now time.Time, ttl time.Duration, maxToDelete int) int
+		ListExpiredAt(now time.Time, ttl time.Duration, maxCount int) []Item
+	}
+
+	// Item — элемент дерева: байтовый ключ и значение.
+	// Не меняйте полученные ключи и значения "на месте"! Копируйте их при необходимости.
+	// Чтобы не сломать инварианты дерева снаружи.
+	Item interface {
+		Key() []byte
+		Value() []byte
+		SetExpirationTime(expiration time.Time)
+		Less(than btree.Item) bool
+		GetExpirationTime() int64
+	}
+)
 
 // Options — параметры инициализации дерева.
 type Options struct {
@@ -42,15 +56,58 @@ type ByteKeyBTree struct {
 	now  func() time.Time
 }
 
-// nodeItem — элемент дерева: ключ и момент последней записи.
-type nodeItem struct {
+type ValueNodeItem struct {
+	valueBytes           []byte
 	keyBytes             []byte
 	timestampUnixSeconds int64
 }
 
+func (v *ValueNodeItem) Key() []byte {
+	return v.keyBytes
+}
+
+func (v *ValueNodeItem) Value() []byte {
+	return v.valueBytes
+}
+
 // Less — порядок для байтовых ключей.
-func (a nodeItem) Less(b btree.Item) bool {
-	return bytes.Compare(a.keyBytes, b.(nodeItem).keyBytes) < 0
+func (v *ValueNodeItem) Less(b btree.Item) bool {
+	return bytes.Compare(v.keyBytes, b.(Item).Key()) < 0
+}
+
+func (v *ValueNodeItem) SetExpirationTime(expiration time.Time) {
+	v.timestampUnixSeconds = expiration.Unix()
+}
+
+func (v *ValueNodeItem) GetExpirationTime() int64 {
+	return v.timestampUnixSeconds
+}
+
+// FilterNodeItem — элемент дерева: ключ и момент последней записи.
+type FilterNodeItem struct {
+	keyBytes             []byte
+	timestampUnixSeconds int64
+}
+
+func (a *FilterNodeItem) Key() []byte {
+	return a.keyBytes
+}
+
+func (a *FilterNodeItem) Value() []byte {
+	return nil
+}
+
+// Less — порядок для байтовых ключей.
+func (a *FilterNodeItem) Less(b btree.Item) bool {
+	return bytes.Compare(a.keyBytes, b.(Item).Key()) < 0
+}
+
+func (a *FilterNodeItem) SetExpirationTime(expiration time.Time) {
+	a.timestampUnixSeconds = expiration.Unix()
+}
+
+func (a *FilterNodeItem) GetExpirationTime() int64 {
+	return a.timestampUnixSeconds
 }
 
 // NewByteKeyBTree создаёт дерево с указанными опциями.
@@ -86,14 +143,16 @@ func cloneBytes(src []byte) []byte {
 
 // UpsertAt — вставка/обновление с заданным моментом времени.
 // Возвращает true, если ключ был новым.
-func (b *ByteKeyBTree) UpsertAt(key []byte, ts time.Time) bool {
-	if len(key) == 0 {
+// Не нужно передавать разные типы Item для одного и того же дерева! Будут проблемы с приведением типов.
+func (b *ByteKeyBTree) UpsertAt(item Item, ts time.Time) bool {
+	if item == nil {
 		return false
 	}
-	item := nodeItem{
-		keyBytes:             cloneBytes(key),
-		timestampUnixSeconds: ts.Unix(),
+	if len(item.Key()) == 0 {
+		return false
 	}
+
+	item.SetExpirationTime(ts)
 	b.mu.Lock()
 	prev := b.tree.ReplaceOrInsert(item)
 	b.mu.Unlock()
@@ -103,22 +162,20 @@ func (b *ByteKeyBTree) UpsertAt(key []byte, ts time.Time) bool {
 
 // UpsertManyAt — массовая вставка/обновление с заданным моментом времени.
 // Возвращает число реально новых ключей.
-func (b *ByteKeyBTree) UpsertManyAt(keys [][]byte, at time.Time) int {
-	if len(keys) == 0 {
+func (b *ByteKeyBTree) UpsertManyAt(items []Item, at time.Time) int {
+	if len(items) == 0 {
 		return 0
 	}
-	sec := at.Unix()
 	added := 0
 
 	b.mu.Lock()
-	for _, key := range keys {
-		if len(key) == 0 {
+	for _, item := range items {
+		if len(item.Key()) == 0 {
 			continue
 		}
-		prev := b.tree.ReplaceOrInsert(nodeItem{
-			keyBytes:             cloneBytes(key),
-			timestampUnixSeconds: sec,
-		})
+
+		item.SetExpirationTime(at)
+		prev := b.tree.ReplaceOrInsert(item)
 		if prev == nil {
 			added++
 		}
@@ -129,29 +186,32 @@ func (b *ByteKeyBTree) UpsertManyAt(keys [][]byte, at time.Time) int {
 }
 
 // Delete — удаление ключа. Возвращает true, если ключ существовал.
-func (b *ByteKeyBTree) Delete(key []byte) bool {
-	if len(key) == 0 {
+func (b *ByteKeyBTree) Delete(item Item) bool {
+	if item == nil {
 		return false
 	}
-	probe := nodeItem{keyBytes: key}
+	if len(item.Key()) == 0 {
+		return false
+	}
+
 	b.mu.Lock()
-	deleted := b.tree.Delete(probe) != nil
+	deleted := b.tree.Delete(item) != nil
 	b.mu.Unlock()
 	return deleted
 }
 
 // DeleteMany — массовое удаление. Возвращает число реально удалённых ключей.
-func (b *ByteKeyBTree) DeleteMany(keys [][]byte) int {
-	if len(keys) == 0 {
+func (b *ByteKeyBTree) DeleteMany(items []Item) int {
+	if len(items) == 0 {
 		return 0
 	}
 	deleted := 0
 	b.mu.Lock()
-	for _, key := range keys {
-		if len(key) == 0 {
+	for _, item := range items {
+		if len(item.Key()) == 0 {
 			continue
 		}
-		if b.tree.Delete(nodeItem{keyBytes: key}) != nil {
+		if b.tree.Delete(item) != nil {
 			deleted++
 		}
 	}
@@ -160,32 +220,56 @@ func (b *ByteKeyBTree) DeleteMany(keys [][]byte) int {
 }
 
 // Has — проверка наличия ключа.
-func (b *ByteKeyBTree) Has(key []byte) bool {
-	if len(key) == 0 {
+func (b *ByteKeyBTree) Has(item Item) bool {
+	if item == nil {
 		return false
 	}
-	probe := nodeItem{keyBytes: key}
+	if len(item.Key()) == 0 {
+		return false
+	}
+
 	b.mu.RLock()
-	exists := b.tree.Get(probe) != nil
+	exists := b.tree.Get(item) != nil
 	b.mu.RUnlock()
 	return exists
 }
 
+func (b *ByteKeyBTree) GetNodeItem(item Item) (Item, bool) {
+	if item == nil {
+		return nil, false
+	}
+	if len(item.Key()) == 0 {
+		return nil, false
+	}
+
+	b.mu.RLock()
+	res := b.tree.Get(item)
+	b.mu.RUnlock()
+	if res == nil {
+		return nil, false
+	}
+	return res.(Item), true
+}
+
 // GetLastWriteUnix — получить unix-секунды последней вставки/обновления.
 // Возвращает (0,false), если ключ не найден.
-func (b *ByteKeyBTree) GetLastWriteUnix(key []byte) (int64, bool) {
-	probe := nodeItem{keyBytes: key}
+func (b *ByteKeyBTree) GetLastWriteUnix(item Item) (int64, bool) {
+	if item == nil {
+		return 0, false
+	}
+
 	b.mu.RLock()
-	res := b.tree.Get(probe)
+	res := b.tree.Get(item)
 	b.mu.RUnlock()
 	if res == nil {
 		return 0, false
 	}
-	return res.(nodeItem).timestampUnixSeconds, true
+	return res.(Item).GetExpirationTime(), true
 }
 
 // ForEach — полный обход по возрастанию ключей.
 // Если callback возвращает false — обход останавливается.
+// Сначала собираем срез пар (копии ключей + ts) под RLock, потом вызываем callback без блокировки.
 func (b *ByteKeyBTree) ForEach(callback func(key []byte, timestampUnixSeconds int64) bool) error {
 	if callback == nil {
 		return errors.New("nil callback")
@@ -193,9 +277,9 @@ func (b *ByteKeyBTree) ForEach(callback func(key []byte, timestampUnixSeconds in
 	keepGoing := true
 	b.mu.RLock()
 	b.tree.Ascend(func(x btree.Item) bool {
-		it := x.(nodeItem)
-		keyCopy := cloneBytes(it.keyBytes)
-		keepGoing = callback(keyCopy, it.timestampUnixSeconds)
+		it := x.(Item)
+		keyCopy := cloneBytes(it.Key())
+		keepGoing = callback(keyCopy, it.GetExpirationTime())
 		return keepGoing
 	})
 	b.mu.RUnlock()
@@ -225,13 +309,13 @@ func (b *ByteKeyBTree) PurgeExpiredAt(now time.Time, ttl time.Duration, maxToDel
 	}
 	cutoffUnix := now.Add(-ttl).Unix()
 
-	var keysToDelete [][]byte
+	itemsToDelete := make([]Item, 0)
 	b.mu.RLock()
 	b.tree.Ascend(func(x btree.Item) bool {
-		it := x.(nodeItem)
-		if it.timestampUnixSeconds <= cutoffUnix {
-			keysToDelete = append(keysToDelete, cloneBytes(it.keyBytes))
-			if maxToDelete > 0 && len(keysToDelete) >= maxToDelete {
+		it := x.(Item)
+		if it.GetExpirationTime() <= cutoffUnix {
+			itemsToDelete = append(itemsToDelete, it)
+			if maxToDelete > 0 && len(itemsToDelete) >= maxToDelete {
 				return false
 			}
 		}
@@ -239,14 +323,14 @@ func (b *ByteKeyBTree) PurgeExpiredAt(now time.Time, ttl time.Duration, maxToDel
 	})
 	b.mu.RUnlock()
 
-	if len(keysToDelete) == 0 {
+	if len(itemsToDelete) == 0 {
 		return 0
 	}
 
 	deleted := 0
 	b.mu.Lock()
-	for _, key := range keysToDelete {
-		if b.tree.Delete(nodeItem{keyBytes: key}) != nil {
+	for _, item := range itemsToDelete {
+		if b.tree.Delete(item) != nil {
 			deleted++
 		}
 	}
@@ -255,26 +339,24 @@ func (b *ByteKeyBTree) PurgeExpiredAt(now time.Time, ttl time.Duration, maxToDel
 	return deleted
 }
 
-// ListExpiredAt — возвращает КОПИИ всех ключей, чей lastWriteUnix <= (now - ttl).
+// ListExpiredAt — возвращает реальные листья дерева, будьте аккуратны и не меняйте их!
 // Граница включительна. Ничего не удаляет.
 // Если ttl <= 0 — возвращает nil.
 // maxCount > 0 — ограничивает количество возвращаемых ключей, 0/отрицательное — без лимита.
-func (b *ByteKeyBTree) ListExpiredAt(now time.Time, ttl time.Duration, maxCount int) [][]byte {
+func (b *ByteKeyBTree) ListExpiredAt(now time.Time, ttl time.Duration, maxCount int) []Item {
 	if ttl <= 0 {
 		return nil
 	}
-	cutoff := now.Unix()
+	cutoff := now.Add(-ttl).Unix()
 
-	var out [][]byte
+	out := make([]Item, 0)
 	limit := maxCount > 0
 
 	b.mu.RLock()
 	b.tree.Ascend(func(x btree.Item) bool {
-		it := x.(nodeItem)
-		//log.Printf("Checking difference it.timestampUnixSeconds-cutoff=%d", it.timestampUnixSeconds-cutoff)
-		if it.timestampUnixSeconds <= cutoff {
-			k := cloneBytes(it.keyBytes)
-			out = append(out, k)
+		it := x.(Item)
+		if it.GetExpirationTime() <= cutoff {
+			out = append(out, it)
 			if limit && len(out) >= maxCount {
 				return false
 			}
