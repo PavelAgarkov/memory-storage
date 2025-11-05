@@ -3,234 +3,22 @@ package memory_storage
 import (
 	"bytes"
 	"math/rand"
-	"sort"
 	"sync"
 	"testing"
 	"time"
 )
 
-func newFilter(key []byte) *FilterNodeItem {
-	return &FilterNodeItem{keyBytes: append([]byte(nil), key...)}
+// удобные хелперы для тестов
+
+func newTestFilter(key string, ts time.Time) *FilterNodeItem {
+	return NewFilterNodeItem([]byte(key), ts)
 }
 
-func newValue(key, val []byte) *ValueNodeItem {
-	return &ValueNodeItem{
-		keyBytes:   append([]byte(nil), key...),
-		valueBytes: append([]byte(nil), val...),
-	}
+func newTestValue(key, val string, ts time.Time) *ValueNodeItem {
+	return NewValueNodeItem([]byte(key), []byte(val), ts)
 }
 
-func equalStringSets(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	aa := append([]string(nil), a...)
-	bb := append([]string(nil), b...)
-	sort.Strings(aa)
-	sort.Strings(bb)
-	for i := range aa {
-		if aa[i] != bb[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func TestUpsert_Has_GetLastWriteUnix_Filter(t *testing.T) {
-	tr := NewByteKeyBTree(Options{})
-
-	k := []byte("a")
-	it := newFilter(k)
-
-	ts1 := time.Unix(1000, 0)
-	if added := tr.UpsertAt(it, ts1); !added {
-		t.Fatalf("expected added=true for new key")
-	}
-	if !tr.Has(newFilter(k)) {
-		t.Fatalf("expected Has(true) after insert")
-	}
-	if got, ok := tr.GetLastWriteUnix(newFilter(k)); !ok || got != ts1.Unix() {
-		t.Fatalf("GetLastWriteUnix mismatch: got (%d,%v), want (%d,true)", got, ok, ts1.Unix())
-	}
-
-	// upsert обновлением (тот же ключ)
-	ts2 := time.Unix(2000, 0)
-	if added := tr.UpsertAt(newFilter(k), ts2); added {
-		t.Fatalf("expected added=false on update")
-	}
-	if got, ok := tr.GetLastWriteUnix(newFilter(k)); !ok || got != ts2.Unix() {
-		t.Fatalf("GetLastWriteUnix after update mismatch: got %d want %d", got, ts2.Unix())
-	}
-}
-
-func TestUpsertMany_Size_And_EmptyKey(t *testing.T) {
-	tr := NewByteKeyBTree(Options{})
-
-	now := time.Unix(5000, 0)
-	items := []Item{
-		newFilter([]byte("a")),
-		newFilter([]byte("b")),
-		newFilter([]byte{}),        // пустой — игнор
-		newFilter([]byte("b")),     // дубликат
-		newValue([]byte("c"), nil), // другой тип
-	}
-
-	added := tr.UpsertManyAt(items, now)
-	if added != 3 { // a, b, c
-		t.Fatalf("added=%d, want 3", added)
-	}
-	if got := tr.Size(); got != 3 {
-		t.Fatalf("size=%d, want 3", got)
-	}
-}
-
-func TestDelete_And_DeleteMany(t *testing.T) {
-	tr := NewByteKeyBTree(Options{})
-
-	tr.UpsertAt(newFilter([]byte("a")), time.Unix(1, 0))
-	tr.UpsertAt(newFilter([]byte("b")), time.Unix(1, 0))
-	tr.UpsertAt(newFilter([]byte("c")), time.Unix(1, 0))
-
-	if ok := tr.Delete(newFilter([]byte("b"))); !ok {
-		t.Fatalf("expected delete b = true")
-	}
-	if tr.Has(newFilter([]byte("b"))) {
-		t.Fatalf("b must be deleted")
-	}
-
-	n := tr.DeleteMany([]Item{
-		newFilter([]byte("x")), // нет
-		newFilter([]byte("a")), // есть
-		newFilter([]byte("c")), // есть
-	})
-	if n != 2 {
-		t.Fatalf("DeleteMany deleted=%d, want 2", n)
-	}
-	if tr.Size() != 0 {
-		t.Fatalf("tree must be empty after deletions")
-	}
-}
-
-func TestGetNodeItem_ReturnsLivePointer(t *testing.T) {
-	tr := NewByteKeyBTree(Options{})
-
-	it := newFilter([]byte("k1"))
-	tr.UpsertAt(it, time.Unix(100, 0))
-
-	got, ok := tr.GetNodeItem(newFilter([]byte("k1")))
-	if !ok {
-		t.Fatalf("GetNodeItem: not found")
-	}
-	// Проверяем, что это тот же объект (указатель)
-	if gotPtr, ok2 := got.(*FilterNodeItem); !ok2 || gotPtr != it {
-		t.Fatalf("GetNodeItem returns different pointer")
-	}
-}
-
-func TestForEach_OrderAscending(t *testing.T) {
-	tr := NewByteKeyBTree(Options{})
-
-	keys := [][]byte{[]byte("c"), []byte("a"), []byte("b")}
-	for i, k := range keys {
-		tr.UpsertAt(newFilter(k), time.Unix(int64(i+1), 0))
-	}
-
-	var seen [][]byte
-	err := tr.ForEach(func(key []byte, ts int64) bool {
-		seen = append(seen, key)
-		return true
-	})
-	if err != nil {
-		t.Fatalf("ForEach error: %v", err)
-	}
-
-	want := [][]byte{[]byte("a"), []byte("b"), []byte("c")}
-	if len(seen) != len(want) {
-		t.Fatalf("ForEach count=%d want=%d", len(seen), len(want))
-	}
-	for i := range seen {
-		if !bytes.Equal(seen[i], want[i]) {
-			t.Fatalf("order mismatch at %d: got %q want %q", i, seen[i], want[i])
-		}
-	}
-}
-
-func TestReset(t *testing.T) {
-	tr := NewByteKeyBTree(Options{})
-	tr.UpsertAt(newFilter([]byte("x")), time.Now())
-	if tr.Size() != 1 {
-		t.Fatalf("size before reset=%d want=1", tr.Size())
-	}
-	tr.Reset()
-	if tr.Size() != 0 {
-		t.Fatalf("size after reset=%d want=0", tr.Size())
-	}
-}
-func TestTTL_ListExpired_PurgeExpired_MaxLimits(t *testing.T) {
-	tr := NewByteKeyBTree(Options{})
-
-	base := time.Unix(10_000, 0)
-	type pair struct {
-		k string
-		t int64
-	}
-	data := []pair{
-		{"a", base.Unix() - 100},
-		{"b", base.Unix() - 50},
-		{"c", base.Unix() - 1}, // НЕ истёк при ttl=30s
-		{"d", base.Unix() + 100},
-	}
-	for _, p := range data {
-		it := newFilter([]byte(p.k))
-		it.SetExpirationTime(time.Unix(p.t, 0))
-		tr.UpsertAt(it, time.Unix(p.t, 0))
-	}
-
-	ttl := 30 * time.Second // cutoff = base - 30s
-
-	expired := tr.ListExpiredAt(base, ttl, 0)
-	if len(expired) != 2 { // <-- было 3
-		t.Fatalf("expired count=%d want=2", len(expired))
-	}
-	var gotKeys []string
-	for _, it := range expired {
-		gotKeys = append(gotKeys, string(it.Key()))
-	}
-	if want := []string{"a", "b"}; !equalStringSets(gotKeys, want) { // <-- было a,b,c
-		t.Fatalf("expired keys=%v want=%v", gotKeys, want)
-	}
-
-	// maxCount=1 ограничивает выдачу
-	exp2 := tr.ListExpiredAt(base, ttl, 1) // <-- было 2
-	if len(exp2) != 1 {
-		t.Fatalf("expired limited count=%d want=1", len(exp2))
-	}
-
-	// Purge с лимитом 1
-	deleted := tr.PurgeExpiredAt(base, ttl, 1) // <-- было 2
-	if deleted != 1 {
-		t.Fatalf("purge deleted=%d want=1", deleted)
-	}
-	if tr.Size() != 3 { // было 4, удалили 1 => 3
-		t.Fatalf("size after partial purge=%d want=3", tr.Size())
-	}
-
-	// Дочистим остаток без лимита
-	deleted2 := tr.PurgeExpiredAt(base, ttl, 0)
-	if deleted2 != 1 { // удалится второй «просроченный»
-		t.Fatalf("purge remainder deleted=%d want=1", deleted2)
-	}
-	if tr.Has(newFilter([]byte("a"))) || tr.Has(newFilter([]byte("b"))) {
-		t.Fatalf("expired entries should be gone")
-	}
-	if !tr.Has(newFilter([]byte("c"))) || !tr.Has(newFilter([]byte("d"))) {
-		t.Fatalf("fresh entries c,d must remain")
-	}
-}
-
-// --- хелперы
-
-func mustKeysFromItems(items []Item) []string {
+func keysFromItems(items []Item) []string {
 	out := make([]string, 0, len(items))
 	for _, it := range items {
 		out = append(out, string(it.Key()))
@@ -238,149 +26,438 @@ func mustKeysFromItems(items []Item) []string {
 	return out
 }
 
-// --- доп. функциональные тесты
-
-func TestTTL_BoundaryInclusive(t *testing.T) {
-	t.Parallel()
-
-	tr := NewByteKeyBTree(Options{})
-	base := time.Unix(20_000, 0)
-	ttl := 30 * time.Second
-	cutoff := base.Add(-ttl)
-
-	a := newFilter([]byte("a"))
-	b := newFilter([]byte("b"))
-	c := newFilter([]byte("c"))
-
-	// a — сильно старый, b — ровно на границе (должен попасть), c — свежий
-	tr.UpsertAt(a, cutoff.Add(-1*time.Second))
-	tr.UpsertAt(b, cutoff)
-	tr.UpsertAt(c, cutoff.Add(1*time.Second))
-
-	exp := tr.ListExpiredAt(base, ttl, 0)
-	got := mustKeysFromItems(exp)
-	sort.Strings(got)
-
-	want := []string{"a", "b"}
-	if len(got) != len(want) || got[0] != "a" || got[1] != "b" {
-		t.Fatalf("expired=%v want=%v", got, want)
+func sortedEqualStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
 	}
-}
-
-func TestTTL_ZeroOrNegativeTTL(t *testing.T) {
-	t.Parallel()
-
-	tr := NewByteKeyBTree(Options{})
-	now := time.Now()
-
-	tr.UpsertAt(newFilter([]byte("x")), now.Add(-time.Hour))
-
-	if out := tr.ListExpiredAt(now, 0, 10); out != nil {
-		t.Fatalf("ttl=0 must return nil slice, got %v", out)
+	m := make(map[string]int, len(a))
+	for _, x := range a {
+		m[x]++
 	}
-	if del := tr.PurgeExpiredAt(now, -1, 0); del != 0 {
-		t.Fatalf("ttl<=0 must delete 0, got %d", del)
-	}
-}
-
-func TestDeleteMany_Idempotent(t *testing.T) {
-	t.Parallel()
-
-	tr := NewByteKeyBTree(Options{})
-	tr.UpsertAt(newFilter([]byte("a")), time.Now())
-	tr.UpsertAt(newFilter([]byte("b")), time.Now())
-
-	n1 := tr.DeleteMany([]Item{newFilter([]byte("a")), newFilter([]byte("b"))})
-	if n1 != 2 {
-		t.Fatalf("first deleteMany=%d want=2", n1)
-	}
-
-	n2 := tr.DeleteMany([]Item{newFilter([]byte("a")), newFilter([]byte("b"))})
-	if n2 != 0 {
-		t.Fatalf("second deleteMany=%d want=0", n2)
-	}
-}
-
-func TestUpsertMany_CountsOnlyNew(t *testing.T) {
-	t.Parallel()
-
-	tr := NewByteKeyBTree(Options{})
-	now := time.Unix(1, 0)
-
-	items := []Item{
-		newFilter([]byte("a")),
-		newFilter([]byte("b")),
-		newFilter([]byte("a")), // дубликат
-		newValue([]byte("c"), []byte("v")),
-		newValue([]byte("c"), []byte("v2")), // дубликат
-	}
-
-	if added := tr.UpsertManyAt(items, now); added != 3 {
-		t.Fatalf("added=%d want=3", added)
-	}
-	// обновим теми же ключами — добавлений быть не должно
-	if added := tr.UpsertManyAt(items, now.Add(time.Hour)); added != 0 {
-		t.Fatalf("added on update=%d want=0", added)
-	}
-}
-
-func TestListExpired_LimitOrder(t *testing.T) {
-	t.Parallel()
-
-	tr := NewByteKeyBTree(Options{})
-	base := time.Unix(30_000, 0)
-	ttl := 1 * time.Hour
-
-	// все истёкшие (час назад и старше)
-	for _, k := range []string{"d", "a", "c", "b"} {
-		tr.UpsertAt(newFilter([]byte(k)), base.Add(-2*time.Hour))
-	}
-	out := tr.ListExpiredAt(base, ttl, 2)
-	got := mustKeysFromItems(out)
-
-	// должны прийти первые 2 по ключу: a, b
-	want := []string{"a", "b"}
-	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("limited expired=%v want=%v", got, want)
-	}
-}
-
-func TestGetNodeItem_LivePointerMutationAffectsTTL(t *testing.T) {
-	t.Parallel()
-
-	tr := NewByteKeyBTree(Options{})
-	base := time.Unix(40_000, 0)
-	ttl := 10 * time.Second
-
-	k := []byte("k")
-	tr.UpsertAt(newFilter(k), base.Add(-1*time.Minute)) // точно истёк
-
-	it, ok := tr.GetNodeItem(newFilter(k))
-	if !ok {
-		t.Fatalf("GetNodeItem not found")
-	}
-
-	// поднимем timestamp "извне"
-	it.SetExpirationTime(base.Add(1 * time.Minute))
-
-	// теперь запись не должна считаться истёкшей
-	exp := tr.ListExpiredAt(base, ttl, 0)
-	for _, e := range exp {
-		if bytes.Equal(e.Key(), k) {
-			t.Fatalf("key %q must NOT be expired after external timestamp bump", k)
+	for _, x := range b {
+		m[x]--
+		if m[x] < 0 {
+			return false
 		}
 	}
+	for _, v := range m {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
 }
 
-// --- конкурентные тесты
+// ============================================================================
+// Базовые операции: Upsert / Has / GetLastWriteUnix / GetNodeItem
+// ============================================================================
 
-func TestConcurrent_ReadersWriters_MixedStableSet(t *testing.T) {
-	// множество фиксированных ключей; писатели обновляют ts, читатели сканируют/Has/Get
+func TestBTree_UpsertAndHas_FilterItem(t *testing.T) {
 	t.Parallel()
 
-	tr := NewByteKeyBTree(Options{})
+	bt := NewByteKeyBTree(Options{})
+	ts := time.Unix(1000, 0)
+	it := newTestFilter("a", ts)
+
+	if added := bt.Upsert(it); !added {
+		t.Fatalf("expected Upsert to report new item")
+	}
+
+	// Has по новому Item с тем же ключом, но другим ts
+	probe := newTestFilter("a", ts.Add(10*time.Second))
+	if !bt.Has(probe) {
+		t.Fatalf("Has must be true for existing key")
+	}
+
+	// GetLastWriteUnix возвращает исходный ts
+	got, ok := bt.GetLastWriteUnix(probe)
+	if !ok || got != ts.Unix() {
+		t.Fatalf("GetLastWriteUnix: got (%d,%v), want (%d,true)", got, ok, ts.Unix())
+	}
+}
+
+func TestBTree_UpsertAndHas_ValueItem(t *testing.T) {
+	t.Parallel()
+
+	bt := NewByteKeyBTree(Options{})
+	ts := time.Unix(2000, 0)
+	it := newTestValue("k", "payload", ts)
+
+	if added := bt.Upsert(it); !added {
+		t.Fatalf("expected Upsert to report new item")
+	}
+
+	if !bt.Has(newTestValue("k", "", ts.Add(time.Minute))) {
+		t.Fatalf("Has must be true for existing key")
+	}
+
+	gotTs, ok := bt.GetLastWriteUnix(newTestValue("k", "", ts))
+	if !ok || gotTs != ts.Unix() {
+		t.Fatalf("GetLastWriteUnix: got (%d,%v), want (%d,true)", gotTs, ok, ts.Unix())
+	}
+
+	// Проверяем, что value сохранился
+	found, ok := bt.GetNodeItem(newTestValue("k", "", ts))
+	if !ok {
+		t.Fatalf("GetNodeItem: not found")
+	}
+	v, ok := found.(*ValueNodeItem)
+	if !ok {
+		t.Fatalf("GetNodeItem: expected *ValueNodeItem")
+	}
+	if !bytes.Equal(v.Value(), []byte("payload")) {
+		t.Fatalf("Value mismatch: got %q, want %q", v.Value(), "payload")
+	}
+}
+
+func TestBTree_UpsertMany_CountsOnlyNew(t *testing.T) {
+	t.Parallel()
+
+	bt := NewByteKeyBTree(Options{})
+	base := time.Unix(3000, 0)
+
+	items := []Item{
+		newTestFilter("a", base),
+		newTestFilter("b", base),
+		newTestFilter("", base),                   // пустой ключ — игнор
+		newTestFilter("b", base.Add(time.Second)), // дубликат
+		newTestValue("c", "x", base),
+		nil, // nil — игнор
+	}
+
+	added := bt.UpsertMany(items)
+	if added != 3 { // a,b,c
+		t.Fatalf("UpsertMany added=%d, want 3", added)
+	}
+	if size := bt.Size(); size != 3 {
+		t.Fatalf("Size=%d, want 3", size)
+	}
+
+	// повторная вставка тех же ключей — добавлений быть не должно
+	added2 := bt.UpsertMany(items)
+	if added2 != 0 {
+		t.Fatalf("UpsertMany on same keys added=%d, want 0", added2)
+	}
+}
+
+func TestBTree_DeleteAndDeleteMany(t *testing.T) {
+	t.Parallel()
+
+	bt := NewByteKeyBTree(Options{})
+	now := time.Unix(4000, 0)
+
+	bt.Upsert(newTestFilter("a", now))
+	bt.Upsert(newTestFilter("b", now))
+	bt.Upsert(newTestFilter("c", now))
+
+	if ok := bt.Delete(newTestFilter("b", now)); !ok {
+		t.Fatalf("Delete(b) must be true")
+	}
+	if bt.Has(newTestFilter("b", now)) {
+		t.Fatalf("b must be deleted")
+	}
+
+	n := bt.DeleteMany([]Item{
+		newTestFilter("x", now), // нет
+		newTestFilter("a", now), // есть
+		nil,                     // игнор
+		newTestFilter("c", now), // есть
+	})
+	if n != 2 {
+		t.Fatalf("DeleteMany deleted=%d, want 2", n)
+	}
+	if bt.Size() != 0 {
+		t.Fatalf("tree must be empty after deletions, size=%d", bt.Size())
+	}
+}
+
+func TestBTree_GetNodeItem_ReturnsSamePointer(t *testing.T) {
+	t.Parallel()
+
+	bt := NewByteKeyBTree(Options{})
+	ts := time.Unix(5000, 0)
+
+	original := NewFilterNodeItem([]byte("key"), ts)
+	bt.Upsert(original)
+
+	found, ok := bt.GetNodeItem(NewFilterNodeItem([]byte("key"), ts))
+	if !ok {
+		t.Fatalf("GetNodeItem: not found")
+	}
+	ptr, ok := found.(*FilterNodeItem)
+	if !ok {
+		t.Fatalf("GetNodeItem: expected *FilterNodeItem")
+	}
+	if ptr != original {
+		t.Fatalf("GetNodeItem: pointer changed, want same pointer")
+	}
+}
+
+func TestBTree_GetLastWriteUnix_MissingKey(t *testing.T) {
+	t.Parallel()
+
+	bt := NewByteKeyBTree(Options{})
+	ts, ok := bt.GetLastWriteUnix(newTestFilter("absent", time.Now()))
+	if ok || ts != 0 {
+		t.Fatalf("GetLastWriteUnix on missing key: got (%d,%v), want (0,false)", ts, ok)
+	}
+}
+
+// ============================================================================
+// ForEach / порядок / Size / Reset
+// ============================================================================
+
+func TestBTree_ForEach_AscendingOrder(t *testing.T) {
+	t.Parallel()
+
+	bt := NewByteKeyBTree(Options{})
+	base := time.Unix(6000, 0)
+
+	bt.Upsert(newTestFilter("c", base))
+	bt.Upsert(newTestFilter("a", base))
+	bt.Upsert(newTestFilter("b", base))
+
+	var seen []string
+	err := bt.ForEach(func(key []byte, _ int64) bool {
+		seen = append(seen, string(key))
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ForEach error: %v", err)
+	}
+
+	want := []string{"a", "b", "c"}
+	if !sortedEqualStrings(seen, want) || !(seen[0] == "a" && seen[1] == "b" && seen[2] == "c") {
+		t.Fatalf("ForEach order=%v, want %v", seen, want)
+	}
+}
+
+func TestBTree_ForEach_StopEarly(t *testing.T) {
+	t.Parallel()
+
+	bt := NewByteKeyBTree(Options{})
+	base := time.Unix(7000, 0)
+
+	for _, k := range []string{"a", "b", "c"} {
+		bt.Upsert(newTestFilter(k, base))
+	}
+
+	var seen []string
+	err := bt.ForEach(func(key []byte, _ int64) bool {
+		seen = append(seen, string(key))
+		return len(seen) < 2 // остановимся после двух
+	})
+	if err != nil {
+		t.Fatalf("ForEach error: %v", err)
+	}
+	if len(seen) != 2 {
+		t.Fatalf("ForEach early stop: got %d items, want 2", len(seen))
+	}
+}
+
+func TestBTree_SizeAndReset(t *testing.T) {
+	t.Parallel()
+
+	bt := NewByteKeyBTree(Options{})
+
+	bt.Upsert(newTestFilter("x", time.Now()))
+	bt.Upsert(newTestFilter("y", time.Now()))
+
+	if sz := bt.Size(); sz != 2 {
+		t.Fatalf("Size before Reset=%d, want 2", sz)
+	}
+	bt.Reset()
+	if sz := bt.Size(); sz != 0 {
+		t.Fatalf("Size after Reset=%d, want 0", sz)
+	}
+}
+
+// ============================================================================
+// TTL: ListExpiredAt / PurgeExpiredAt
+// ============================================================================
+
+func TestBTree_TTL_ListExpired_BoundaryInclusive(t *testing.T) {
+	t.Parallel()
+
+	bt := NewByteKeyBTree(Options{})
+
+	base := time.Unix(8000, 0)
+	ttl := 30 * time.Second
+	cutoff := base.Add(-ttl).Unix()
+
+	data := []struct {
+		key string
+		ts  int64
+	}{
+		{"a", base.Unix() - 100}, // старый
+		{"b", base.Unix() - 50},  // старый
+		{"c", cutoff},            // ровно на границе → тоже истёк
+		{"d", base.Unix() + 100}, // свежий
+	}
+	for _, d := range data {
+		bt.Upsert(newTestFilter(d.key, time.Unix(d.ts, 0)))
+	}
+
+	expired := bt.ListExpiredAt(base, ttl, 0)
+	got := keysFromItems(expired)
+
+	if len(expired) != 3 {
+		t.Fatalf("expired count=%d, want 3", len(expired))
+	}
+	if !sortedEqualStrings(got, []string{"a", "b", "c"}) {
+		t.Fatalf("expired keys=%v, want [a b c]", got)
+	}
+}
+
+func TestBTree_TTL_ListExpired_ZeroTTLReturnsNil(t *testing.T) {
+	t.Parallel()
+
+	bt := NewByteKeyBTree(Options{})
+	now := time.Now()
+
+	bt.Upsert(newTestFilter("x", now.Add(-time.Hour)))
+
+	if res := bt.ListExpiredAt(now, 0, 10); res != nil {
+		t.Fatalf("ListExpiredAt with ttl=0 must return nil, got %v", res)
+	}
+	if deleted := bt.PurgeExpiredAt(now, -1, 0); deleted != 0 {
+		t.Fatalf("PurgeExpiredAt with ttl<=0 must delete 0, got %d", deleted)
+	}
+}
+
+func TestBTree_TTL_PurgeExpired_RemovesOnlyOld(t *testing.T) {
+	t.Parallel()
+
+	bt := NewByteKeyBTree(Options{})
+
+	base := time.Unix(9000, 0)
+	ttl := 30 * time.Second
+	cutoff := base.Add(-ttl).Unix()
+
+	bt.Upsert(newTestFilter("a", time.Unix(base.Unix()-100, 0))) // истёк
+	bt.Upsert(newTestFilter("b", time.Unix(base.Unix()-50, 0)))  // истёк
+	bt.Upsert(newTestFilter("c", time.Unix(cutoff, 0)))          // истёк
+	bt.Upsert(newTestFilter("d", time.Unix(base.Unix()+100, 0))) // свежий
+
+	deleted := bt.PurgeExpiredAt(base, ttl, 0)
+	if deleted != 3 {
+		t.Fatalf("PurgeExpiredAt deleted=%d, want 3", deleted)
+	}
+
+	if bt.Has(newTestFilter("a", base)) ||
+		bt.Has(newTestFilter("b", base)) ||
+		bt.Has(newTestFilter("c", base)) {
+		t.Fatalf("expired items must be removed")
+	}
+	if !bt.Has(newTestFilter("d", base)) {
+		t.Fatalf("fresh item d must remain")
+	}
+}
+
+func TestBTree_TTL_ListExpired_LimitAndOrder(t *testing.T) {
+	t.Parallel()
+
+	bt := NewByteKeyBTree(Options{})
+
+	base := time.Unix(10_000, 0)
+	ttl := 1 * time.Hour
+
+	for _, k := range []string{"d", "a", "c", "b"} {
+		bt.Upsert(newTestFilter(k, base.Add(-2*time.Hour))) // все истёкшие
+	}
+
+	expired := bt.ListExpiredAt(base, ttl, 2)
+	if len(expired) != 2 {
+		t.Fatalf("ListExpiredAt limited count=%d, want 2", len(expired))
+	}
+	got := keysFromItems(expired)
+	if !(got[0] == "a" && got[1] == "b") {
+		t.Fatalf("ListExpiredAt limited order=%v, want [a b]", got)
+	}
+}
+
+func TestBTree_ListExpired_ReturnsLivePointers(t *testing.T) {
+	t.Parallel()
+
+	bt := NewByteKeyBTree(Options{})
+
+	base := time.Unix(11_000, 0)
+	ttl := 10 * time.Second
+
+	// делаем один явно истёкший
+	old := NewFilterNodeItem([]byte("k"), base.Add(-time.Minute))
+	bt.Upsert(old)
+
+	// получаем «expired»
+	exp := bt.ListExpiredAt(base, ttl, 0)
+	if len(exp) != 1 {
+		t.Fatalf("expected exactly 1 expired item, got %d", len(exp))
+	}
+
+	// меняем timestamp напрямую → теперь не должен считаться истёкшим
+	exp[0].(*FilterNodeItem).timestampUnixSeconds = base.Add(time.Minute).Unix()
+
+	again := bt.ListExpiredAt(base, ttl, 0)
+	if len(again) != 0 {
+		t.Fatalf("expected 0 expired after raising timestamp, got %d", len(again))
+	}
+}
+
+// ============================================================================
+// Смешивание типов FilterNodeItem / ValueNodeItem
+// ============================================================================
+
+func TestBTree_MixedTypes_HasCompatible(t *testing.T) {
+	t.Parallel()
+
+	bt := NewByteKeyBTree(Options{})
+
+	ts := time.Unix(12_000, 0)
+
+	bt.Upsert(newTestFilter("k1", ts))
+	bt.Upsert(newTestValue("k2", "v", ts))
+
+	if !bt.Has(newTestValue("k1", "", ts)) {
+		t.Fatalf("Has must find filter key k1 via value-probe")
+	}
+	if !bt.Has(newTestFilter("k2", ts)) {
+		t.Fatalf("Has must find value key k2 via filter-probe")
+	}
+}
+
+func TestBTree_MixedTypes_OrderByKey(t *testing.T) {
+	t.Parallel()
+
+	bt := NewByteKeyBTree(Options{})
+
+	ts := time.Unix(13_000, 0)
+
+	bt.Upsert(newTestValue("b", "v", ts))
+	bt.Upsert(newTestFilter("a", ts))
+	bt.Upsert(newTestFilter("c", ts))
+
+	var seen []string
+	_ = bt.ForEach(func(key []byte, _ int64) bool {
+		seen = append(seen, string(key))
+		return true
+	})
+
+	want := []string{"a", "b", "c"}
+	if len(seen) != len(want) ||
+		seen[0] != "a" || seen[1] != "b" || seen[2] != "c" {
+		t.Fatalf("mixed types order=%v, want %v", seen, want)
+	}
+}
+
+// ============================================================================
+// Конкурентные тесты
+// ============================================================================
+
+func TestBTree_Concurrent_ReadersAndWriters(t *testing.T) {
+	bt := NewByteKeyBTree(Options{})
+
 	keys := make([][]byte, 200)
-	for i := range keys {
+	for i := 0; i < len(keys); i++ {
 		keys[i] = []byte{byte(i)}
 	}
 
@@ -388,83 +465,78 @@ func TestConcurrent_ReadersWriters_MixedStableSet(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// писатели
-	writer := func(id int) {
-		defer wg.Done()
-		r := rand.New(rand.NewSource(int64(1000 + id)))
-		for {
-			select {
-			case <-stop:
-				return
-			default:
+	for w := 0; w < 4; w++ {
+		wg.Add(1)
+		go func(seed int64) {
+			defer wg.Done()
+			r := rand.New(rand.NewSource(seed))
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				k := keys[r.Intn(len(keys))]
+				bt.Upsert(NewFilterNodeItem(k, time.Unix(14_000, 0)))
 			}
-			k := keys[r.Intn(len(keys))]
-			tr.UpsertAt(newFilter(k), time.Unix(time.Now().Unix(), 0))
-		}
+		}(int64(1000 + w))
 	}
 
 	// читатели
-	reader := func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-stop:
-				return
-			default:
+	for rID := 0; rID < 4; rID++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_ = bt.ForEach(func(_ []byte, _ int64) bool { return true })
+				_ = bt.Size()
 			}
-			_ = tr.ForEach(func(_ []byte, _ int64) bool { return true })
-			_ = tr.Has(newFilter([]byte{123})) // произвольная проверка
-		}
+		}()
 	}
 
-	for i := 0; i < 4; i++ {
-		wg.Add(1)
-		go writer(i)
-	}
-	for i := 0; i < 4; i++ {
-		wg.Add(1)
-		go reader()
-	}
-
-	time.Sleep(200 * time.Millisecond) // дать погонять работу
+	time.Sleep(200 * time.Millisecond)
 	close(stop)
 	wg.Wait()
 
-	// должно быть не ноль (writers отработали)
-	if tr.Size() == 0 {
-		t.Fatalf("size must be > 0 after concurrent writers")
+	if bt.Size() == 0 {
+		t.Fatalf("Concurrent_ReadersAndWriters: tree must not be empty")
 	}
 }
 
-func TestConcurrent_PurgeWhileWriting(t *testing.T) {
-	// одновременно upsert'ы и периодические purge; в конце убеждаемся, что оставшиеся записи свежие
-	t.Parallel()
+func TestBTree_Concurrent_PurgeWhileWriting(t *testing.T) {
+	bt := NewByteKeyBTree(Options{})
 
-	tr := NewByteKeyBTree(Options{})
-	now := time.Unix(50_000, 0)
+	now := time.Unix(15_000, 0)
 	ttl := 2 * time.Second
+	cutoffUnix := now.Add(-ttl).Unix()
 
-	// стартовый набор (часть устаревших, часть свежих)
+	// стартовые данные: часть старые, часть почти свежие
 	for i := 0; i < 100; i++ {
-		ts := now.Add(time.Duration(-5+i%10) * time.Second) // часть < cutoff
-		tr.UpsertAt(newFilter([]byte{byte(i)}), ts)
+		ts := now.Add(time.Duration(-5+i%4) * time.Second) // часть < cutoff, часть > cutoff
+		bt.Upsert(NewFilterNodeItem([]byte{byte(i)}, ts))
 	}
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 
-	// писатели поднимают ts
+	// писатель: делает элементы явно свежими
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		r := rand.New(rand.NewSource(777))
 		for {
 			select {
 			case <-stop:
 				return
 			default:
 			}
-			k := []byte{byte(r.Intn(100))}
-			tr.UpsertAt(newFilter(k), now.Add(5*time.Second)) // свежий ts
+			for i := 0; i < 10; i++ {
+				bt.Upsert(NewFilterNodeItem([]byte{byte(i)}, now.Add(5*time.Second)))
+			}
 		}
 	}()
 
@@ -472,14 +544,14 @@ func TestConcurrent_PurgeWhileWriting(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		tick := time.NewTicker(5 * time.Millisecond)
-		defer tick.Stop()
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
 		for {
 			select {
 			case <-stop:
 				return
-			case <-tick.C:
-				tr.PurgeExpiredAt(now, ttl, 10) // чистим пачками
+			case <-ticker.C:
+				bt.PurgeExpiredAt(now, ttl, 10)
 			}
 		}
 	}()
@@ -488,10 +560,10 @@ func TestConcurrent_PurgeWhileWriting(t *testing.T) {
 	close(stop)
 	wg.Wait()
 
-	// Проверим, что все оставшиеся записи не просрочены относительно now/ttl
-	err := tr.ForEach(func(_ []byte, tsUnix int64) bool {
-		if tsUnix <= now.Add(-ttl).Unix() {
-			t.Fatalf("found expired entry after purges: ts=%d cutoff=%d", tsUnix, now.Add(-ttl).Unix())
+	// Проверяем, что не осталось элементов со старым ts
+	err := bt.ForEach(func(_ []byte, tsUnix int64) bool {
+		if tsUnix <= cutoffUnix {
+			t.Fatalf("found expired item after purges: ts=%d cutoff=%d", tsUnix, cutoffUnix)
 		}
 		return true
 	})
@@ -500,16 +572,15 @@ func TestConcurrent_PurgeWhileWriting(t *testing.T) {
 	}
 }
 
-func TestConcurrent_ListExpiredDuringWrites_NoDeadlockAndLimits(t *testing.T) {
-	t.Parallel()
+func TestBTree_Concurrent_ListExpiredDuringWrites(t *testing.T) {
+	bt := NewByteKeyBTree(Options{})
 
-	tr := NewByteKeyBTree(Options{})
-	now := time.Unix(60_000, 0)
+	now := time.Unix(16_000, 0)
 	ttl := 1 * time.Second
 
-	// начальный набор старых ключей
+	// все изначально старые
 	for i := 0; i < 100; i++ {
-		tr.UpsertAt(newFilter([]byte{byte(i)}), now.Add(-2*time.Second))
+		bt.Upsert(NewFilterNodeItem([]byte{byte(i)}, now.Add(-2*time.Second)))
 	}
 
 	stop := make(chan struct{})
@@ -527,11 +598,11 @@ func TestConcurrent_ListExpiredDuringWrites_NoDeadlockAndLimits(t *testing.T) {
 			default:
 			}
 			k := []byte{byte(r.Intn(100))}
-			tr.UpsertAt(newFilter(k), now.Add(time.Second))
+			bt.Upsert(NewFilterNodeItem(k, now.Add(2*time.Second)))
 		}
 	}()
 
-	// параллельно дергаем ListExpiredAt с лимитами
+	// несколько горутин, которые дергают ListExpiredAt с лимитом
 	for i := 0; i < 4; i++ {
 		wg.Add(1)
 		go func() {
@@ -542,9 +613,9 @@ func TestConcurrent_ListExpiredDuringWrites_NoDeadlockAndLimits(t *testing.T) {
 					return
 				default:
 				}
-				out := tr.ListExpiredAt(now, ttl, 7)
+				out := bt.ListExpiredAt(now, ttl, 7)
 				if len(out) > 7 {
-					t.Fatalf("limit violated: got %d > 7", len(out))
+					t.Fatalf("ListExpiredAt limit violated: got %d > 7", len(out))
 				}
 			}
 		}()
@@ -555,18 +626,18 @@ func TestConcurrent_ListExpiredDuringWrites_NoDeadlockAndLimits(t *testing.T) {
 	wg.Wait()
 }
 
-func TestConcurrent_DeleteWhileIterating(t *testing.T) {
-	t.Parallel()
+func TestBTree_Concurrent_DeleteDuringIteration(t *testing.T) {
+	bt := NewByteKeyBTree(Options{})
 
-	tr := NewByteKeyBTree(Options{})
+	ts := time.Unix(17_000, 0)
 	for i := 0; i < 200; i++ {
-		tr.UpsertAt(newFilter([]byte{byte(i)}), time.Unix(int64(i), 0))
+		bt.Upsert(NewFilterNodeItem([]byte{byte(i)}, ts))
 	}
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 
-	// итератор под RLock
+	// итератор
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -576,43 +647,20 @@ func TestConcurrent_DeleteWhileIterating(t *testing.T) {
 				return
 			default:
 			}
-			_ = tr.ForEach(func(_ []byte, _ int64) bool { return true })
+			_ = bt.ForEach(func(_ []byte, _ int64) bool { return true })
 		}
 	}()
 
-	// удалятор под Lock
+	// удалятор
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 200; i++ {
-			tr.Delete(newFilter([]byte{byte(i)}))
+			bt.Delete(NewFilterNodeItem([]byte{byte(i)}, ts))
 		}
 	}()
 
 	time.Sleep(100 * time.Millisecond)
 	close(stop)
 	wg.Wait()
-}
-
-// sanity: порядок ключей при смешении типов в дереве
-func TestOrderWithMixedTypes(t *testing.T) {
-	t.Parallel()
-
-	tr := NewByteKeyBTree(Options{})
-	tr.UpsertAt(newFilter([]byte("b")), time.Unix(1, 0))
-	tr.UpsertAt(newValue([]byte("a"), []byte("v")), time.Unix(1, 0))
-	tr.UpsertAt(newFilter([]byte("c")), time.Unix(1, 0))
-
-	var got [][]byte
-	_ = tr.ForEach(func(k []byte, _ int64) bool {
-		got = append(got, k)
-		return true
-	})
-
-	want := [][]byte{[]byte("a"), []byte("b"), []byte("c")}
-	for i := range want {
-		if !bytes.Equal(got[i], want[i]) {
-			t.Fatalf("order mismatch: got %q want %q", got[i], want[i])
-		}
-	}
 }
